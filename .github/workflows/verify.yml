@@ -1,0 +1,65 @@
+name: Verify PostgreSQL pipeline
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: portfolio_test
+          POSTGRES_PASSWORD: local_test_password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d portfolio_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      PGHOST: localhost
+      PGDATABASE: portfolio_test
+      PGUSER: postgres
+      PGPASSWORD: local_test_password
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify Python and PostgreSQL deployment
+        run: |
+          python -m py_compile etl/load_trudvsem.py
+          psql -X -v ON_ERROR_STOP=1 -f sql/01_init.sql
+          python - <<'PY'
+          from etl.load_trudvsem import load
+
+          rows = [{
+              'payload': {
+                  'id': '6862fba9-d1b6-400d-a7ba-00ab24310c14',
+                  'job-name': 'Системный администратор',
+                  'creation-date': '2026-11-01',
+                  'salary_min': '30000',
+                  'salary_max': '40000',
+                  'company': {'name': 'Test employer'},
+              },
+              'roles': {2: 'Системное администрирование'},
+          }]
+          load(rows)
+          load(rows)
+          PY
+          test "$(psql -XAt -v ON_ERROR_STOP=1 -c 'SELECT count(*), round(min(salary_estimate_rub)) FROM mart.vacancy_roles')" = '1|35000'
+          psql -X -v ON_ERROR_STOP=1 -f sql/02_analytics.sql
+      - name: Verify stress-test assertions
+        run: |
+          psql -XAt -v ON_ERROR_STOP=1 -f sql/stress_test.sql > stress-result.txt
+          cat stress-result.txt
+          grep -Fx '50000|26500.5' stress-result.txt
+          test "$(tail -n 1 stress-result.txt)" = '0'
